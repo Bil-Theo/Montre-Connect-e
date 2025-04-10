@@ -1,0 +1,19 @@
+SET(SOURCES components/ui_comp_screenbase.c
+    components/ui_comp.c
+    screens/ui_Screen1.c
+    screens/ui_Screen2.c
+    screens/ui_Screen3.c
+    ui.c
+    components/ui_comp_hook.c
+    ui_helpers.c
+    images/ui_img_humidite_png.c
+    images/ui_img_temperature_png.c
+    images/ui_img_887419821.c
+    images/ui_img_1976085116.c
+    images/ui_img_allumer_png.c
+    images/ui_img_1869196203.c
+    images/ui_img_poubelle_png.c
+    images/ui_img_426965798.c
+    images/ui_img_boussole_png.c)
+
+add_library(ui ${SOURCES})

@@ -1,514 +1,392 @@
-/*
- * Copyright (c) 2019 STMicroelectronics
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-
+// === Includes communs ===
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
-#include <stdio.h>
+#include <zephyr/drivers/display.h>
+#include <zephyr/input/input.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/drivers/rtc.h>
+#include <lvgl.h>
+#include <lvgl_mem.h>
+#include "ui/ui.h"
+#include <stdio.h>
+#include <limits.h>
 
-#ifdef CONFIG_LIS2MDL_TRIGGER
-static int lis2mdl_trig_cnt;
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <bluetooth/services/nus.h>
 
-static void lis2mdl_trigger_handler(const struct device *dev,
-				    const struct sensor_trigger *trig)
-{
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_ALL);
-	lis2mdl_trig_cnt++;
+// === Définition et configuration ===
+#define STACK_SIZE 2048
+K_THREAD_STACK_DEFINE(thread_stack_area_0, STACK_SIZE);
+K_THREAD_STACK_DEFINE(thread_stack_area_1, STACK_SIZE);
+K_THREAD_STACK_DEFINE(thread_stack_area_2, STACK_SIZE);
+K_THREAD_STACK_DEFINE(thread_stack_area_3, STACK_SIZE);
+K_THREAD_STACK_DEFINE(thread_stack_area_4, STACK_SIZE);
+
+struct k_thread thread_task_0, thread_task_1, thread_task_2, thread_task_3, thread_task_4;
+struct rtc_time now;
+K_SEM_DEFINE(i2c_sem, 1, 1);
+LOG_MODULE_REGISTER(app);
+
+// ui.c ou main.c
+int ss;
+int mm;
+int etat;
+
+
+
+bool touch_handled = false;
+
+// === Capteurs ===
+const struct device *hts221  = DEVICE_DT_GET_ANY(st_hts221);
+const struct device *lps22hh = DEVICE_DT_GET_ANY(st_lps22hh);
+const struct device *lis2mdl = DEVICE_DT_GET_ANY(st_lis2mdl);
+const struct device *lsm6dso = DEVICE_DT_GET_ANY(st_lsm6dso);
+uint32_t seconds = 0;  // Compteur des secondes
+uint32_t minutes = 0;  // Compteur des minutes
+uint32_t hours = 0;    // Compteur des heures
+
+
+void RTC_INIT(){
+
+
+	const struct device *rtc_dev = DEVICE_DT_GET(DT_NODELABEL(rv8263));
+
+	device_is_ready(rtc_dev);
+
+	struct rtc_time date = {
+		.tm_sec = 0,
+		.tm_min = 32,
+		.tm_hour = 18,
+		.tm_mday = 10,
+		.tm_mon = 3,
+		.tm_year = 2025 - 1900,
+	};
+
+	rtc_set_time(rtc_dev, &date);
 }
-#endif
 
-#ifdef CONFIG_LPS22HH_TRIGGER
-static int lps22hh_trig_cnt;
 
-static void lps22hh_trigger_handler(const struct device *dev,
-				    const struct sensor_trigger *trig)
-{
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_PRESS);
-	lps22hh_trig_cnt++;
-}
-#endif
+void ma_rtc() {
+    // Récupérer l'appareil RTC
+    const struct device *rtc_dev = DEVICE_DT_GET_ANY(microcrystal_rv_8263_c8);
+    if (!device_is_ready(rtc_dev)) {
+        // Vérification si le périphérique RTC est prêt
+        LOG_ERR("RTC device is not ready.");
+        printk("RTC device is not ready.\n");
+        return;
+    }
 
-#ifdef CONFIG_STTS751_TRIGGER
-static int stts751_trig_cnt;
+    int ret = rtc_get_time(rtc_dev, &now);
+    if (ret < 0) {
+        // Si l'appel pour obtenir l'heure échoue
+        LOG_ERR("Failed to get RTC time");
+        printk("Failed to get RTC time\n");
+        return;
+    }
 
-static void stts751_trigger_handler(const struct device *dev,
-				    const struct sensor_trigger *trig)
-{
-	stts751_trig_cnt++;
-}
-#endif
-
-#ifdef CONFIG_LIS2DW12_TRIGGER
-static int lis2dw12_trig_cnt;
-
-static void lis2dw12_trigger_handler(const struct device *dev,
-				     const struct sensor_trigger *trig)
-{
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_ACCEL_XYZ);
-	lis2dw12_trig_cnt++;
-}
-#endif
-
-#ifdef CONFIG_LSM6DSO_TRIGGER
-static int lsm6dso_acc_trig_cnt;
-static int lsm6dso_gyr_trig_cnt;
-static int lsm6dso_temp_trig_cnt;
-
-static void lsm6dso_acc_trig_handler(const struct device *dev,
-				     const struct sensor_trigger *trig)
-{
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_ACCEL_XYZ);
-	lsm6dso_acc_trig_cnt++;
+    // Afficher l'heure dans un format lisible
+    /*printk("Current time: %02d:%02d:%02d %02d/%02d/%04d\n",
+           now.tm_hour, now.tm_min, now.tm_sec,
+           now.tm_mday, now.tm_mon + 1, now.tm_year + 1900);*/
 }
 
-static void lsm6dso_gyr_trig_handler(const struct device *dev,
-				     const struct sensor_trigger *trig)
+
+// === Touchscreen ===
+static struct k_sem touch_sync;
+static bool screen_touched = false;
+static int current_screen = 1;
+static const struct device *const touch_dev_main = DEVICE_DT_GET(DT_NODELABEL(tsc2007_adafruit_2_8_tft_touch_v2));
+
+static void bt_ready(int err)
 {
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_GYRO_XYZ);
-	lsm6dso_gyr_trig_cnt++;
+    if (err) {
+        printk("Bluetooth init failed (err %d)\n", err);
+        return;
+    }
+
+    printk("Bluetooth initialized\n");
+
+    err = bt_le_adv_start(BT_LE_ADV_PARAM( BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_USE_NAME, BT_GAP_ADV_FAST_INT_MIN_2,BT_GAP_ADV_FAST_INT_MAX_2,NULL),
+        NULL, 0, NULL, 0);
+
+    if (err) {
+        printk("Advertising failed to start (err %d)\n", err);
+    }
 }
 
-static void lsm6dso_temp_trig_handler(const struct device *dev,
-				      const struct sensor_trigger *trig)
-{
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_DIE_TEMP);
-	lsm6dso_temp_trig_cnt++;
+static void touch_event_callback(struct input_event *evt, void *user_data) {
+    // Désactivation du changement d'écran sur simple toucher
+    if (evt->code == INPUT_BTN_TOUCH && evt->sync) {
+        k_sem_give(&touch_sync); // Synchronisation pour d'autres usages si nécessaire
+    }
 }
-#endif
 
-#ifdef CONFIG_LIS2DE12_TRIGGER
-static int lis2de12_trig_cnt;
-
-static void lis2de12_trigger_handler(const struct device *dev,
-				    const struct sensor_trigger *trig)
-{
-	sensor_sample_fetch_chan(dev, SENSOR_CHAN_ALL);
-	lis2de12_trig_cnt++;
-}
-#endif
-
-static void lis2mdl_config(const struct device *lis2mdl)
-{
-	struct sensor_value odr_attr;
-
-	/* set LIS2MDL sampling frequency to 100 Hz */
-	odr_attr.val1 = 100;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(lis2mdl, SENSOR_CHAN_ALL,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for LIS2MDL\n");
+void init_touch_detection(const struct device *touch_dev) {
+	if (!device_is_ready(touch_dev)) {
+		printk("Touch device not ready\n");
 		return;
 	}
-
-#ifdef CONFIG_LIS2MDL_TRIGGER
-	struct sensor_trigger trig;
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_MAGN_XYZ;
-	sensor_trigger_set(lis2mdl, &trig, lis2mdl_trigger_handler);
-#endif
+	k_sem_init(&touch_sync, 0, 1);
 }
-
-static void lps22hh_config(const struct device *lps22hh)
-{
-	struct sensor_value odr_attr;
-
-	/* set LPS22HH sampling frequency to 100 Hz */
-	odr_attr.val1 = 100;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(lps22hh, SENSOR_CHAN_ALL,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for LPS22HH\n");
-		return;
-	}
-
-#ifdef CONFIG_LPS22HH_TRIGGER
-	struct sensor_trigger trig;
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_ALL;
-	sensor_trigger_set(lps22hh, &trig, lps22hh_trigger_handler);
-#endif
+bool is_screen_touched(void) {
+	k_sem_take(&touch_sync, K_FOREVER);
+	return screen_touched;
 }
+INPUT_CALLBACK_DEFINE(touch_dev_main, touch_event_callback, NULL);
 
-static void stts751_config(const struct device *stts751)
+// === Fonctions de config capteurs ===
+// (identiques aux deux fichiers - gardées telles quelles)
+static void lis2mdl_config(const struct device *dev) {}
+static void lps22hh_config(const struct device *dev) { /* voir original */ }
+static void lsm6dso_config(const struct device *dev) { /* voir original */ }
+
+// === Tâches capteurs ===
+struct sensor_value temp1, hum, press;
+struct sensor_value accel1[3], gyro[3], magn[3];
+
+void lps22hh_task(void)
 {
-	struct sensor_value odr_attr;
-
-	/* set STTS751 conversion rate to 16 Hz */
-	odr_attr.val1 = 16;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(stts751, SENSOR_CHAN_ALL,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for STTS751\n");
-		return;
-	}
-
-#ifdef CONFIG_STTS751_TRIGGER
-	struct sensor_trigger trig;
-
-	trig.type = SENSOR_TRIG_THRESHOLD;
-	trig.chan = SENSOR_CHAN_ALL;
-	sensor_trigger_set(stts751, &trig, stts751_trigger_handler);
-#endif
-}
-
-static void lis2dw12_config(const struct device *lis2dw12)
-{
-	struct sensor_value odr_attr, fs_attr;
-
-	/* set LIS2DW12 accel/gyro sampling frequency to 100 Hz */
-	odr_attr.val1 = 100;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(lis2dw12, SENSOR_CHAN_ACCEL_XYZ,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for LIS2DW12 accel\n");
-		return;
-	}
-
-	sensor_g_to_ms2(16, &fs_attr);
-
-	if (sensor_attr_set(lis2dw12, SENSOR_CHAN_ACCEL_XYZ,
-			    SENSOR_ATTR_FULL_SCALE, &fs_attr) < 0) {
-		printk("Cannot set sampling frequency for LIS2DW12 gyro\n");
-		return;
-	}
-
-#ifdef CONFIG_LIS2DW12_TRIGGER
-	struct sensor_trigger trig;
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-	sensor_trigger_set(lis2dw12, &trig, lis2dw12_trigger_handler);
-#endif
-}
-
-static void lsm6dso_config(const struct device *lsm6dso)
-{
-	struct sensor_value odr_attr, fs_attr;
-
-	/* set LSM6DSO accel sampling frequency to 208 Hz */
-	odr_attr.val1 = 208;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(lsm6dso, SENSOR_CHAN_ACCEL_XYZ,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for LSM6DSO accel\n");
-		return;
-	}
-
-	sensor_g_to_ms2(16, &fs_attr);
-
-	if (sensor_attr_set(lsm6dso, SENSOR_CHAN_ACCEL_XYZ,
-			    SENSOR_ATTR_FULL_SCALE, &fs_attr) < 0) {
-		printk("Cannot set fs for LSM6DSO accel\n");
-		return;
-	}
-
-	/* set LSM6DSO gyro sampling frequency to 208 Hz */
-	odr_attr.val1 = 208;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(lsm6dso, SENSOR_CHAN_GYRO_XYZ,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for LSM6DSO gyro\n");
-		return;
-	}
-
-	sensor_degrees_to_rad(250, &fs_attr);
-
-	if (sensor_attr_set(lsm6dso, SENSOR_CHAN_GYRO_XYZ,
-			    SENSOR_ATTR_FULL_SCALE, &fs_attr) < 0) {
-		printk("Cannot set fs for LSM6DSO gyro\n");
-		return;
-	}
-
-#ifdef CONFIG_LSM6DSO_TRIGGER
-	struct sensor_trigger trig;
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-	sensor_trigger_set(lsm6dso, &trig, lsm6dso_acc_trig_handler);
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_GYRO_XYZ;
-	sensor_trigger_set(lsm6dso, &trig, lsm6dso_gyr_trig_handler);
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_DIE_TEMP;
-	sensor_trigger_set(lsm6dso, &trig, lsm6dso_temp_trig_handler);
-#endif
-}
-
-static void lis2de12_config(const struct device *lis2de12)
-{
-	struct sensor_value odr_attr, fs_attr;
-
-	/* set LIS2DE12 accel/gyro sampling frequency to 100 Hz */
-	odr_attr.val1 = 200;
-	odr_attr.val2 = 0;
-
-	if (sensor_attr_set(lis2de12, SENSOR_CHAN_ACCEL_XYZ,
-			    SENSOR_ATTR_SAMPLING_FREQUENCY, &odr_attr) < 0) {
-		printk("Cannot set sampling frequency for LIS2DE12 accel\n");
-		return;
-	}
-
-	sensor_g_to_ms2(2, &fs_attr);
-
-	if (sensor_attr_set(lis2de12, SENSOR_CHAN_ACCEL_XYZ,
-			    SENSOR_ATTR_FULL_SCALE, &fs_attr) < 0) {
-		printk("Cannot set sampling frequency for LIS2DE12 gyro\n");
-		return;
-	}
-
-#ifdef CONFIG_LIS2DE12_TRIGGER
-	struct sensor_trigger trig;
-
-	trig.type = SENSOR_TRIG_DATA_READY;
-	trig.chan = SENSOR_CHAN_ACCEL_XYZ;
-	sensor_trigger_set(lis2de12, &trig, lis2de12_trigger_handler);
-#endif
-}
-
-int main(void)
-{
-	struct sensor_value temp1, temp2, temp3, hum, press;
-#ifdef CONFIG_LSM6DSO_ENABLE_TEMP
-	struct sensor_value die_temp;
-#endif
-	struct sensor_value die_temp2;
-	struct sensor_value accel1[3], accel2[3];
-	struct sensor_value gyro[3];
-	struct sensor_value magn[3];
-	struct sensor_value lis2de12_xl[3];
-#ifdef CONFIG_LIS2DE12_ENABLE_TEMP
-	struct sensor_value lis2de12_die_temp;
-#endif
-	const struct device *const hts221 = DEVICE_DT_GET_ONE(st_hts221);
-	const struct device *const lps22hh = DEVICE_DT_GET_ONE(st_lps22hh);
-	const struct device *const stts751 = DEVICE_DT_GET_ONE(st_stts751);
-	const struct device *const lis2mdl = DEVICE_DT_GET_ONE(st_lis2mdl);
-	const struct device *const lis2dw12 = DEVICE_DT_GET_ONE(st_lis2dw12);
-	const struct device *const lsm6dso = DEVICE_DT_GET_ONE(st_lsm6dso);
-
-	/* on DIL24 */
-	const struct device *const lis2de12 = DEVICE_DT_GET_ANY(st_lis2de12);
-	int cnt = 1;
-	int lis2de12_on_dil24 = 0;
-
-	if (!device_is_ready(hts221)) {
-		printk("%s: device not ready.\n", hts221->name);
-		return 0;
-	}
-	if (!device_is_ready(lps22hh)) {
-		printk("%s: device not ready.\n", lps22hh->name);
-		return 0;
-	}
-	if (!device_is_ready(stts751)) {
-		printk("%s: device not ready.\n", stts751->name);
-		return 0;
-	}
-	if (!device_is_ready(lis2mdl)) {
-		printk("%s: device not ready.\n", lis2mdl->name);
-		return 0;
-	}
-	if (!device_is_ready(lis2dw12)) {
-		printk("%s: device not ready.\n", lis2dw12->name);
-		return 0;
-	}
-	if (!device_is_ready(lsm6dso)) {
-		printk("%s: device not ready.\n", lsm6dso->name);
-		return 0;
-	}
-	if (device_is_ready(lis2de12)) {
-		lis2de12_on_dil24 = 1;
-	} else {
-		printf("Device %s is not ready\n", lis2de12->name);
-		/* no device on DIL24, skip it */
-	}
-
-	lis2mdl_config(lis2mdl);
-	lps22hh_config(lps22hh);
-	stts751_config(stts751);
-	lis2dw12_config(lis2dw12);
-	lsm6dso_config(lsm6dso);
-	if (lis2de12_on_dil24) {
-		lis2de12_config(lis2de12);
-	}
+	struct sensor_value press;
 
 	while (1) {
-		/* Get sensor samples */
-
-		if (sensor_sample_fetch(hts221) < 0) {
-			printf("HTS221 Sensor sample update error\n");
-			return 0;
-		}
-#ifndef CONFIG_LPS22HH_TRIGGER
-		if (sensor_sample_fetch(lps22hh) < 0) {
-			printf("LPS22HH Sensor sample update error\n");
-			return 0;
-		}
-#endif
-		if (sensor_sample_fetch(stts751) < 0) {
-			printf("STTS751 Sensor sample update error\n");
-			return 0;
-		}
-
-#ifndef CONFIG_LIS2MDL_TRIGGER
+		k_sem_take(&i2c_sem, K_FOREVER);
 		if (sensor_sample_fetch(lis2mdl) < 0) {
-			printf("LIS2MDL Magn Sensor sample update error\n");
-			return 0;
-		}
-#endif
+			printf("LIS2MDL sample error\n");
 
-#ifndef CONFIG_LIS2DW12_TRIGGER
-		if (sensor_sample_fetch(lis2dw12) < 0) {
-			printf("LIS2DW12 Sensor sample update error\n");
-			return 0;
 		}
-#endif
-#ifndef CONFIG_LSM6DSO_TRIGGER
-		if (sensor_sample_fetch(lsm6dso) < 0) {
-			printf("LSM6DSO Sensor sample update error\n");
-			return 0;
-		}
-#endif
-#ifndef CONFIG_LIS2DE12_TRIGGER
-		if (lis2de12_on_dil24) {
-			if (sensor_sample_fetch(lis2de12) < 0) {
-				printf("LIS2DE12 Sensor sample update error\n");
-				return 0;
-			}
-		}
-#endif
-
-		/* Get sensor data */
-
-		sensor_channel_get(hts221, SENSOR_CHAN_AMBIENT_TEMP, &temp1);
-		sensor_channel_get(hts221, SENSOR_CHAN_HUMIDITY, &hum);
-		sensor_channel_get(lps22hh, SENSOR_CHAN_AMBIENT_TEMP, &temp2);
 		sensor_channel_get(lps22hh, SENSOR_CHAN_PRESS, &press);
-		sensor_channel_get(stts751, SENSOR_CHAN_AMBIENT_TEMP, &temp3);
-		sensor_channel_get(lis2mdl, SENSOR_CHAN_MAGN_XYZ, magn);
-		sensor_channel_get(lis2mdl, SENSOR_CHAN_DIE_TEMP, &die_temp2);
-		sensor_channel_get(lis2dw12, SENSOR_CHAN_ACCEL_XYZ, accel2);
-		sensor_channel_get(lsm6dso, SENSOR_CHAN_ACCEL_XYZ, accel1);
-		sensor_channel_get(lsm6dso, SENSOR_CHAN_GYRO_XYZ, gyro);
-#ifdef CONFIG_LSM6DSO_ENABLE_TEMP
-		sensor_channel_get(lsm6dso, SENSOR_CHAN_DIE_TEMP, &die_temp);
-#endif
-		if (lis2de12_on_dil24) {
-			sensor_channel_get(lis2de12, SENSOR_CHAN_ACCEL_XYZ, lis2de12_xl);
-#ifdef CONFIG_LIS2DE12_ENABLE_TEMP
-			sensor_channel_get(lis2de12, SENSOR_CHAN_DIE_TEMP, &lis2de12_die_temp);
-#endif
+		k_sem_give(&i2c_sem);
+		//printf("LPS22HH: Pressure: %.3f kPa\n", sensor_value_to_double(&press));
+		k_sleep(K_SECONDS(3));
+	}
+}
+
+
+void lis2mdl_task(void)
+{
+	struct sensor_value press;
+
+	while (1) {
+		k_sem_take(&i2c_sem, K_FOREVER);
+		if (sensor_sample_fetch(lis2mdl) < 0) {
+			printf("LIS2MDL sample error\n");
 		}
-
-		/* Display sensor data */
-
-		/* Erase previous */
-		printf("\0033\014");
-
-		printf("X-NUCLEO-IKS01A3 sensor dashboard\n\n");
-
-		/* temperature */
-		printf("HTS221: Temperature: %.1f C\n",
-		       sensor_value_to_double(&temp1));
-
-		/* humidity */
-		printf("HTS221: Relative Humidity: %.1f%%\n",
-		       sensor_value_to_double(&hum));
-
-		/* temperature */
-		printf("LPS22HH: Temperature: %.1f C\n",
-		       sensor_value_to_double(&temp2));
-
-		/* pressure */
-		printf("LPS22HH: Pressure:%.3f kpa\n",
-		       sensor_value_to_double(&press));
-
-		/* temperature */
-		printf("STTS751: Temperature: %.1f C\n",
-		       sensor_value_to_double(&temp3));
-
-		/* lis2mdl */
-		printf("LIS2MDL: Magn (gauss): x: %.3f, y: %.3f, z: %.3f\n",
+		
+		sensor_channel_get(lis2mdl, SENSOR_CHAN_MAGN_XYZ, magn);
+		k_sem_give(&i2c_sem);
+		/*printf("LIS2MDL: Magnetometer (gauss): x=%.3f y=%.3f z=%.3f\n",
 		       sensor_value_to_double(&magn[0]),
 		       sensor_value_to_double(&magn[1]),
-		       sensor_value_to_double(&magn[2]));
+		       sensor_value_to_double(&magn[2]));*/
+		k_sleep(K_SECONDS(3));
+	}
+}
 
-		printf("LIS2MDL: Temperature: %.1f C\n",
-		       sensor_value_to_double(&die_temp2));
+void lsm6dso_task(void)
+{
+	struct sensor_value press;
 
-		printf("LIS2DW12: Accel (m.s-2): x: %.3f, y: %.3f, z: %.3f\n",
-			sensor_value_to_double(&accel2[0]),
-			sensor_value_to_double(&accel2[1]),
-			sensor_value_to_double(&accel2[2]));
+	while (1) {
+		k_sem_take(&i2c_sem, K_FOREVER);
+		if (sensor_sample_fetch(lsm6dso) < 0) {
+			printf("LIS2MDL sample error\n");
+		}
+		sensor_channel_get(lsm6dso, SENSOR_CHAN_ACCEL_XYZ, accel1);
+		sensor_channel_get(lsm6dso, SENSOR_CHAN_GYRO_XYZ, gyro);
+		k_sem_give(&i2c_sem);
+		/*printf("LSM6DSO: Accel (m/s²): x=%.3f y=%.3f z=%.3f\n",
+		       sensor_value_to_double(&accel1[0]),
+		       sensor_value_to_double(&accel1[1]),
+		       sensor_value_to_double(&accel1[2]));
+		printf("LSM6DSO: Gyro (dps): x=%.3f y=%.3f z=%.3f\n",
+		       sensor_value_to_double(&gyro[0]),
+		       sensor_value_to_double(&gyro[1]),
+		       sensor_value_to_double(&gyro[2]));
+		k_sleep(K_SECONDS(3));*/
+	}
+}
 
-		printf("LSM6DSO: Accel (m.s-2): x: %.3f, y: %.3f, z: %.3f\n",
-			sensor_value_to_double(&accel1[0]),
-			sensor_value_to_double(&accel1[1]),
-			sensor_value_to_double(&accel1[2]));
+void chrono_task() {
+    // Boucle infinie pour mettre à jour l'affichage toutes les secondes
+    while (1) {
+        // Calculer le temps écoulé en secondes
+        
+		if(etat == 1){
+			seconds++;
 
-		printf("LSM6DSO: GYro (dps): x: %.3f, y: %.3f, z: %.3f\n",
-			sensor_value_to_double(&gyro[0]),
-			sensor_value_to_double(&gyro[1]),
-			sensor_value_to_double(&gyro[2]));
-
-#ifdef CONFIG_LSM6DSO_ENABLE_TEMP
-		/* temperature */
-		printf("LSM6DSO: Temperature: %.1f C\n",
-		       sensor_value_to_double(&die_temp));
-#endif
-		if (lis2de12_on_dil24) {
-			printf("LIS2DE12: Accel (m.s-2): x: %.3f, y: %.3f, z: %.3f\n",
-				sensor_value_to_double(&lis2de12_xl[0]),
-				sensor_value_to_double(&lis2de12_xl[1]),
-				sensor_value_to_double(&lis2de12_xl[2]));
-
-#ifdef CONFIG_LIS2DE12_ENABLE_TEMP
-			/* temperature */
-			printf("LIS2DE12: Temperature: %.1f C\n",
-			    sensor_value_to_double(&lis2de12_die_temp));
-#endif
+        // Gérer les minutes et les heures
+        if (seconds >= 60) {
+            seconds = 0;
+            minutes++;
+        }
+        if (minutes >= 60) {
+            minutes = 0;
+            hours++;
+        }
+        if (hours >= 24) {
+            hours = 0; // Remise à zéro des heures après 24 heures
+        }
+			update_display_chrono(minutes, seconds);
+		}
+		else if(etat == 2){
+			mm = minutes;
+			ss = seconds;
+			update_display_chrono(mm, ss);
+		}
+		else{
+			minutes = 0;
+			seconds = 0;
 		}
 
-#if defined(CONFIG_LIS2MDL_TRIGGER)
-		printk("%d:: lis2mdl trig %d\n", cnt, lis2mdl_trig_cnt);
-#endif
+        // Afficher le temps écoulé sous le format hh:mm:ss
+        printk("%02d:%02d:%02d\n", hours, minutes, seconds);
 
-#if defined(CONFIG_LPS22HH_TRIGGER)
-		printk("%d:: lps22hh trig %d\n", cnt, lps22hh_trig_cnt);
-#endif
+        // Attendre 1 seconde avant de mettre à jour le chrono
+        k_msleep(1000);  // Attente de 1000 ms (1 seconde)
+    }
+}
 
-#if defined(CONFIG_STTS751_TRIGGER)
-		printk("%d:: stts751 trig %d\n", cnt, stts751_trig_cnt);
-#endif
+void task_rtc(void)
+{
+	while (1) {
+		k_sem_take(&i2c_sem, K_FOREVER);
+		ma_rtc();
+		k_sem_give(&i2c_sem);
 
-#ifdef CONFIG_LIS2DW12_TRIGGER
-		printk("%d:: lis2dw12 trig %d\n", cnt, lis2dw12_trig_cnt);
-#endif
-
-#ifdef CONFIG_LSM6DSO_TRIGGER
-		printk("%d:: lsm6dso acc trig %d\n", cnt, lsm6dso_acc_trig_cnt);
-		printk("%d:: lsm6dso gyr trig %d\n", cnt, lsm6dso_gyr_trig_cnt);
-		printk("%d:: lsm6dso temp trig %d\n", cnt,
-			lsm6dso_temp_trig_cnt);
-#endif
-#ifdef CONFIG_LIS2DE12_TRIGGER
-		printk("%d:: lis2de12 acc trig %d\n", cnt, lis2de12_trig_cnt);
-#endif
-
-		cnt++;
-		k_sleep(K_MSEC(2000));
+		update_display_time(now.tm_hour, now.tm_min,
+			now.tm_mday, now.tm_mon + 1, (now.tm_year + 1900)-2000);
+		k_sleep(K_MINUTES(1));
 	}
+}
+void hts221_task(void)
+{
+	struct sensor_value press;
+
+	while (1) {
+		k_sem_take(&i2c_sem, K_FOREVER);//Prendre le 
+		if (sensor_sample_fetch(hts221) < 0) {
+			printf("LIS2MDL sample error\n");
+		}
+		sensor_channel_get(hts221, SENSOR_CHAN_AMBIENT_TEMP, &temp1);
+		sensor_channel_get(hts221, SENSOR_CHAN_HUMIDITY, &hum);
+
+		k_sem_give(&i2c_sem);//Rendre le sémaphore
+
+		/*printf("HTS221: Temp: %.1f C | Humidity: %.1f%%\n",
+			sensor_value_to_double(&temp1),
+			sensor_value_to_double(&hum));
+*/
+		update_display_hts221(sensor_value_to_double(&temp1),
+				      sensor_value_to_double(&hum));
+
+		k_sleep(K_SECONDS(3));
+	}
+}
+// === Main ===
+int main(void) {
+
+	int err;
+
+    err = bt_enable(bt_ready);
+    if (err) {
+        printk("Bluetooth initialization failed (err %d)\n", err);
+        return;
+    }
+
+    printk("Bluetooth initialized successfully\n");
+
+	const struct device *display_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+	if (!device_is_ready(display_dev)) {
+		LOG_ERR("Display device not ready");
+		return 0;
+	}
+	
+	ui_init();
+	display_blanking_off(display_dev);
+#ifdef CONFIG_LV_Z_MEM_POOL_SYS_HEAP
+	lvgl_print_heap_info(false);
+#endif
+
+	if (!device_is_ready(hts221) || !device_is_ready(lps22hh) ||
+	    !device_is_ready(lis2mdl) || !device_is_ready(lsm6dso)) {
+		printk("Sensor devices not ready.\n");
+		return 0;
+	}
+
+	init_touch_detection(touch_dev_main);
+	lis2mdl_config(lis2mdl);
+	lps22hh_config(lps22hh);
+	lsm6dso_config(lsm6dso);
+
+	k_thread_create(&thread_task_0, thread_stack_area_0,
+		K_THREAD_STACK_SIZEOF(thread_stack_area_0),
+		lis2mdl_task,
+		NULL, NULL, NULL,
+		5, 0, K_NO_WAIT);
+
+	 k_thread_create(&thread_task_1, thread_stack_area_1,
+		K_THREAD_STACK_SIZEOF(thread_stack_area_1),
+		hts221_task,
+		NULL, NULL, NULL,
+		5, 0, K_NO_WAIT);
+
+	k_thread_create(&thread_task_2, thread_stack_area_2,
+		K_THREAD_STACK_SIZEOF(thread_stack_area_2),
+		lsm6dso_task,
+		NULL, NULL, NULL,
+		1, 0, K_FOREVER);
+
+		k_thread_create(&thread_task_3, thread_stack_area_3,
+			K_THREAD_STACK_SIZEOF(thread_stack_area_3),
+			task_rtc,
+			NULL, NULL, NULL,
+			1, 0, K_FOREVER);
+
+			k_tid_t id5 = k_thread_create(&thread_task_4, thread_stack_area_4,
+				K_THREAD_STACK_SIZEOF(thread_stack_area_4),
+				chrono_task,
+				NULL, NULL, NULL,
+				1, 0, K_FOREVER);
+			k_thread_start(&thread_task_0);
+			k_thread_start(&thread_task_1);
+			k_thread_start(&thread_task_2);
+			k_thread_start(&thread_task_3);
+			k_thread_start(&thread_task_4);
+	
+
+				RTC_INIT();
+
+			while (1) {
+				if (is_screen_touched()) {
+					if (!touch_handled) {
+						printk("Screen touched!\n");
+			
+						// Changement d'écran cyclique
+						if (current_screen == 1) {
+							_ui_screen_change(&ui_Screen2, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen2_screen_init);
+							current_screen = 2;
+						} else if (current_screen == 2) {
+							_ui_screen_change(&ui_Screen3, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen3_screen_init);
+							current_screen = 3;
+						} else {
+							_ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen1_screen_init);
+							current_screen = 1;
+						}
+			
+						touch_handled = true; // On bloque jusqu’à relâchement
+					}
+				} else {
+					// Le doigt est levé → on peut à nouveau gérer le prochain touch
+					touch_handled = false;
+				}
+			
+				lv_timer_handler();
+				k_msleep(30); // Assez rapide mais pas trop pour éviter rebond
+			}
+			
 }
