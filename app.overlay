@@ -16,6 +16,12 @@
 		int1-gpios =  <&arduino_header 5 GPIO_ACTIVE_HIGH>; /* A5 */
 	};
 
+	lis2dw12: lis2dw12@19 {
+        compatible = "st,lis2dw12";
+        reg = <0x19>;
+        label = "LIS2DW12";
+    };
+
 	tsc2007_adafruit_2_8_tft_touch_v2: tsc2007@48 {
 		status = "okay";
 		compatible = "ti,tsc2007";
