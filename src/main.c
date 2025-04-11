@@ -19,6 +19,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <bluetooth/services/nus.h>
 
+
 // === Définition et configuration ===
 #define STACK_SIZE 2048
 K_THREAD_STACK_DEFINE(thread_stack_area_0, STACK_SIZE);
@@ -485,6 +486,7 @@ int main(void)
 					5, 0, K_NO_WAIT);
 
 	k_thread_create(&thread_task_2, thread_stack_area_2,
+
 					K_THREAD_STACK_SIZEOF(thread_stack_area_2),
 					
 					podometre_task,
@@ -536,6 +538,55 @@ int main(void)
 				{
 					_ui_screen_change(&ui_Screen3, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen3_screen_init);
 					current_screen = 3;
+=======
+		K_THREAD_STACK_SIZEOF(thread_stack_area_2),
+		lsm6dso_task,
+		NULL, NULL, NULL,
+		5, 0, K_FOREVER);
+
+		k_thread_create(&thread_task_3, thread_stack_area_3,
+			K_THREAD_STACK_SIZEOF(thread_stack_area_3),
+			task_rtc,
+			NULL, NULL, NULL,
+			1, 0, K_FOREVER);
+
+			k_tid_t id5 = k_thread_create(&thread_task_4, thread_stack_area_4,
+				K_THREAD_STACK_SIZEOF(thread_stack_area_4),
+				chrono_task,
+				NULL, NULL, NULL,
+				1, 0, K_FOREVER);
+			k_thread_start(&thread_task_0);
+			k_thread_start(&thread_task_1);
+			k_thread_start(&thread_task_2);
+			k_thread_start(&thread_task_3);
+			k_thread_start(&thread_task_4);
+	
+
+				RTC_INIT();
+
+			while (1) {
+				if (is_screen_touched()) {
+					if (!touch_handled) {
+						printk("Screen touched!\n");
+			
+						// Changement d'écran cyclique
+						if (current_screen == 1) {
+							_ui_screen_change(&ui_Screen2, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen2_screen_init);
+							current_screen = 2;
+						} else if (current_screen == 2) {
+							_ui_screen_change(&ui_Screen3, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen3_screen_init);
+							current_screen = 3;
+						} else {
+							_ui_screen_change(&ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 0, 0, &ui_Screen1_screen_init);
+							current_screen = 1;
+						}
+			
+						touch_handled = true; // On bloque jusqu’à relâchement
+					}
+				} else {
+					// Le doigt est levé → on peut à nouveau gérer le prochain touch
+					touch_handled = false;
+
 				}
 				else
 				{
