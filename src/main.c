@@ -19,6 +19,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <bluetooth/services/nus.h>
 
+
 // === Définition et configuration ===
 #define STACK_SIZE 2048
 K_THREAD_STACK_DEFINE(thread_stack_area_0, STACK_SIZE);
@@ -339,7 +340,7 @@ int main(void) {
 		K_THREAD_STACK_SIZEOF(thread_stack_area_2),
 		lsm6dso_task,
 		NULL, NULL, NULL,
-		1, 0, K_FOREVER);
+		5, 0, K_FOREVER);
 
 		k_thread_create(&thread_task_3, thread_stack_area_3,
 			K_THREAD_STACK_SIZEOF(thread_stack_area_3),
